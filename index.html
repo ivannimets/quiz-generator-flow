@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="How the Just Play AI quiz generator works: form, data compaction, AI request, output schema and cost.">
+<title>AI Quiz Generator Flow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: scoreboard-dark page; a horizontal play-by-play pipeline on top, detail drawer below, then schema / data / cost sections */
+:root{
+  --bg:#0d0f12; --panel:#16191e; --panel2:#1d2128; --line:#2a2f38;
+  --fg:#eef1f5; --muted:#9aa3b0; --accent:#2ea3db; --accent-ink:#06141c;
+  --cache:#2fb37a; --var:#e0a43a; --code:#c9d4e2; --warn:#e2574c;
+  --f-display:"Barlow Condensed","Arial Narrow",Arial,sans-serif;
+  --f-body:"Barlow","Helvetica Neue",Arial,sans-serif;
+  --f-mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+@media (prefers-color-scheme: light){ :root:not([data-theme="dark"]){
+  --bg:#f3f5f8; --panel:#ffffff; --panel2:#eef1f5; --line:#d9dee6;
+  --fg:#14181e; --muted:#5b6574; --accent:#1a8cc4; --accent-ink:#ffffff;
+  --cache:#1d8a5c; --var:#a8710f; --code:#22303f; --warn:#c23b30; color-scheme:light } }
+:root[data-theme="light"]{
+  --bg:#f3f5f8; --panel:#ffffff; --panel2:#eef1f5; --line:#d9dee6;
+  --fg:#14181e; --muted:#5b6574; --accent:#1a8cc4; --accent-ink:#ffffff;
+  --cache:#1d8a5c; --var:#a8710f; --code:#22303f; --warn:#c23b30; color-scheme:light }
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:15px;line-height:1.55;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:28px 64px}
+.wrap{max-width:1180px;margin:0 auto;display:flex;flex-direction:column;gap:44px}
+h1,h2,h3{font-family:var(--f-display);text-transform:uppercase;letter-spacing:.02em;margin:0;text-wrap:balance;line-height:1.05}
+h1{font-size:clamp(34px,5vw,54px);font-weight:800}
+h2{font-size:28px;font-weight:700}
+h3{font-size:20px;font-weight:700}
+p{margin:0}
+.eyebrow{font-family:var(--f-display);font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-size:14px}
+.lede{color:var(--muted);max-width:68ch;font-size:16px}
+header{display:flex;flex-direction:column;gap:12px;border-bottom:3px solid var(--accent);padding-bottom:22px}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:var(--muted)}
+.chip{display:inline-flex;align-items:center;gap:6px}
+.dot{width:10px;height:10px;border-radius:2px;display:inline-block}
+section{display:flex;flex-direction:column;gap:18px}
+
+/* pipeline */
+.pipe{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.step{all:unset;cursor:pointer;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 14px 16px;display:flex;flex-direction:column;gap:6px;position:relative;min-width:0}
+.step:hover{border-color:var(--accent)}
+.step:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.step[aria-selected="true"]{border-color:var(--accent);background:var(--panel2);box-shadow:inset 0 -3px 0 var(--accent)}
+.step .n{font-family:var(--f-mono);font-size:12px;color:var(--muted)}
+.step .t{font-family:var(--f-display);font-weight:700;font-size:20px;text-transform:uppercase;line-height:1.1}
+.step .s{font-size:13px;color:var(--muted)}
+.tag{align-self:flex-start;font-family:var(--f-mono);font-size:11px;padding:2px 7px;border-radius:3px;border:1px solid currentColor}
+.tag.code{color:var(--muted)} .tag.ai{color:var(--accent)} .tag.user{color:var(--var)}
+.stage-label{grid-column:1/-1;font-family:var(--f-display);font-weight:700;letter-spacing:.12em;text-transform:uppercase;font-size:13px;color:var(--muted);margin-top:4px}
+
+.drawer{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:6px;padding:22px;display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:24px}
+.drawer ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px}
+.drawer .col{display:flex;flex-direction:column;gap:12px;min-width:0}
+pre{margin:0;font-family:var(--f-mono);font-size:12.5px;line-height:1.55;color:var(--code);background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:14px;overflow-x:auto;white-space:pre}
+.k{color:var(--accent)} .c{color:var(--cache)} .v{color:var(--var)} .m{color:var(--muted)}
+
+/* request anatomy */
+.req{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.req div{padding:10px 14px;display:flex;justify-content:space-between;gap:12px;font-size:14px;border-bottom:1px solid var(--line)}
+.req div:last-child{border-bottom:0}
+.req .cached{background:color-mix(in srgb,var(--cache) 14%,var(--panel))}
+.req .variable{background:color-mix(in srgb,var(--var) 14%,var(--panel))}
+.req .output{background:color-mix(in srgb,var(--accent) 14%,var(--panel))}
+.req span:last-child{font-family:var(--f-mono);font-size:12.5px;color:var(--muted);white-space:nowrap}
+
+/* before / after */
+.ba{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+.ba .col{display:flex;flex-direction:column;gap:8px;min-width:0}
+.bars{display:flex;flex-direction:column;gap:10px}
+.bar{display:grid;grid-template-columns:150px minmax(0,1fr) 90px;align-items:center;gap:10px;font-size:14px}
+.bar .track{height:14px;background:var(--panel2);border-radius:2px;overflow:hidden}
+.bar .fill{height:100%;background:var(--muted)}
+.bar .fill.good{background:var(--cache)}
+.bar .val{font-family:var(--f-mono);font-size:13px;text-align:right;font-variant-numeric:tabular-nums}
+.drop{display:flex;flex-wrap:wrap;gap:8px}
+.drop span{font-size:13px;padding:3px 9px;border-radius:3px;background:var(--panel2);border:1px solid var(--line);text-decoration:line-through;text-decoration-color:var(--warn);color:var(--muted)}
+
+/* cost */
+.calc{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:20px;display:grid;grid-template-columns:minmax(0,300px) minmax(0,1fr);gap:28px}
+.ctrls{display:flex;flex-direction:column;gap:14px}
+label{display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+select,input[type=number]{font:inherit;font-size:15px;color:var(--fg);background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:8px 10px;text-transform:none;letter-spacing:0}
+input[type=range]{accent-color:var(--accent)}
+.check{flex-direction:row;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-weight:500;color:var(--fg);font-size:14px}
+.results{display:flex;flex-direction:column;gap:16px;min-width:0}
+.big{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.big div{display:flex;flex-direction:column;gap:2px}
+.big b{font-family:var(--f-display);font-size:34px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
+.big small{color:var(--muted);font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{font-family:var(--f-display);text-transform:uppercase;letter-spacing:.06em;font-size:13px;color:var(--muted);font-weight:700}
+tr.sel td{color:var(--accent);font-weight:600}
+.tw{overflow-x:auto}
+.note{font-size:13px;color:var(--muted)}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:18px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.card ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:5px}
+
+@media (max-width:900px){
+  .pipe{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .drawer,.calc,.ba,.grid2{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width:480px){
+  .bar{grid-template-columns:100px minmax(0,1fr) 70px}
+  .big b{font-size:26px}
+}
+@media (prefers-reduced-motion:no-preference){ .step{transition:border-color .15s,background .15s} }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <span class="eyebrow">Just Play · TeamAdmin · Quiz Builder</span>
+  <h1>AI Quiz Generator: how it works</h1>
+  <p class="lede">A coach picks one item (scout report, presentation or play), sets a few options and clicks Generate. Our code gathers and compresses the data, one AI call writes multiple-choice questions in a fixed JSON format, and our code turns them into a Pending quiz. Click any step for details.</p>
+  <div class="legend">
+    <span class="chip"><span class="tag user">COACH</span> coach action</span>
+    <span class="chip"><span class="tag code">CODE</span> our server, no AI cost</span>
+    <span class="chip"><span class="tag ai">AI</span> paid model call</span>
+  </div>
+</header>
+
+<section aria-label="Pipeline">
+  <div class="pipe" role="tablist" id="pipe"></div>
+  <div class="drawer" id="drawer" role="tabpanel"></div>
+</section>
+
+<section>
+  <span class="eyebrow">What the AI receives</span>
+  <h2>One request, two halves</h2>
+  <p class="lede">The fixed half is identical for every quiz of the same sport and source type, so the provider caches it and bills it at a tenth (or less) of the normal input price. Only the small variable half is paid in full.</p>
+  <div class="req" aria-label="Request anatomy">
+    <div class="cached"><span><b>Cached</b> · Base instructions (rules for good quiz questions)</span><span>~600 tok</span></div>
+    <div class="cached"><span><b>Cached</b> · Sport × source prompt (e.g. Football + Scout Report)</span><span>~500 tok</span></div>
+    <div class="cached"><span><b>Cached</b> · Output JSON schema (structured output)</span><span>~250 tok</span></div>
+    <div class="cached"><span><b>Cached</b> · Diagram legend (what each icon/label means)</span><span>~150 tok</span></div>
+    <div class="variable"><span><b>Variable</b> · Compact source data</span><span>~600–1,500 tok</span></div>
+    <div class="variable"><span><b>Variable</b> · Media metadata (if attached)</span><span>~100–300 tok</span></div>
+    <div class="variable"><span><b>Variable</b> · Options + coach note (≤200 chars)</span><span>~80 tok</span></div>
+    <div class="output"><span><b>Output</b> · Questions only (no IDs, no settings)</span><span>~90 tok / question</span></div>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Data processing</span>
+  <h2>From database to prompt</h2>
+  <p class="lede">The same queries that build the scout report print collect the data. A code step then strips what the AI does not need and writes the rest as short labelled lines instead of nested JSON. Numbers below are for a sample scout report with 22 players, team stats and 6 diagrams (estimates at ~3.6 characters per token).</p>
+  <div class="bars" aria-label="Token size by format">
+    <div class="bar"><span>Raw JSON (pretty)</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="val">~14,000</span></div>
+    <div class="bar"><span>Raw JSON (minified)</span><div class="track"><div class="fill" style="width:57%"></div></div><span class="val">~8,000</span></div>
+    <div class="bar"><span>Compact format</span><div class="track"><div class="fill good" style="width:5%"></div></div><span class="val">~650</span></div>
+  </div>
+  <div class="drop" aria-label="Removed before sending">
+    <span>_id, teamId, createdBy</span><span>timestamps</span><span>photo &amp; logo URLs</span><span>print settings</span><span>empty sections</span><span>all-zero stat rows</span><span>duplicate diagrams</span><span>repeated notes</span><span>SVG / coordinates</span><span>HTML tags</span>
+  </div>
+  <div class="ba">
+    <div class="col"><h3>Before · database documents</h3>
+<pre><span class="m">// scoutReports + teamStats + players + diagrams</span>
+{
+  <span class="k">"_id"</span>: "kH3pX9wQe2RtYb7Lm",
+  <span class="k">"teamId"</span>: "9sPqR2tUvWx4YzAbC",
+  <span class="k">"createdAt"</span>: "2026-10-01T00:00:00Z",
+  <span class="k">"printSettings"</span>: { "theme": "#9D2235", ... },
+  <span class="k">"sections"</span>: [{
+    <span class="k">"type"</span>: "text",
+    <span class="k">"title"</span>: "Coordinator Overview",
+    <span class="k">"content"</span>: { "html": "&lt;p&gt;&lt;strong&gt;DC&lt;/strong&gt; ..." },
+    <span class="k">"images"</span>: []
+  }, ...],
+  <span class="k">"players"</span>: [{
+    "_id": "...", "firstName": "Jalen",
+    "photoUrl": "https://cdn...jpg",
+    "stats": { "season2025": { "td": 3, "rec": 28,
+      "yds": 319, "sack": 0, "tfl": 0, ... } }
+  }, ... 21 more],
+  <span class="k">"diagrams"</span>: [{ "elements": [{ "x": 412.7,
+     "y": 188.2, "color": "#000", ... }] }]
+}</pre></div>
+    <div class="col"><h3>After · compact text sent to AI</h3>
+<pre><span class="c">SPORT</span> football | <span class="c">SOURCE</span> scout_report
+<span class="c">OPP</span> Ridgeview Hawks | <span class="c">WEEK</span> 9 | TV ESPN
+<span class="c">COORDINATOR</span> Pressure on 3rd down; Cover 3
+  on early downs; rotates safeties late.
+<span class="c">LAST5</span> W31-17 L14-24 W28-10 W21-20 L9-27
+<span class="c">DEPTH</span> X:#9 Pruitt Y:#3 Harlow Z:#1 Okafor
+  RB:#5 Vance QB:#12 Merritt
+<span class="c">PLAYERS</span> #|name|pos|2025 (non-zero only)
+9|J.Pruitt|WR|rec=38 yds=623 td=2 long=57
+3|J.Harlow|WR|rec=28 yds=319 td=3 long=26
+5|S.Vance|RB|att=102 yds=669 td=7 fum=2
+<span class="c">TEAMSTATS</span> value(national rank)
+off.pass yds=3155(71) td=22(85) int=11(77)
+off.rush yds=2303(68) td=25(72)
+def.pass td=22(183) int=6(37)
+def.rush yds=2231(207) td=24(186)
+<span class="c">DIAGRAM</span> "I Right Wiggle 34 Switchblade"
+  front=E,N,T,E LB=W,M S=S alert="Ringo/Lucky"
+<span class="c">DIAGRAM</span> "Shallow 2x2" routes: Y=shallow,
+  H=dig, Z=open access, X=alert post</pre></div>
+  </div>
+  <p class="note">Player names are invented for this example.</p>
+</section>
+
+<section>
+  <span class="eyebrow">What the AI returns</span>
+  <h2>Output schema</h2>
+  <div class="grid2">
+    <div class="card">
+      <h3>AI output (enforced by schema)</h3>
+<pre>{
+  <span class="k">"questions"</span>: [
+    {
+      <span class="k">"q"</span>: "Which receiver leads the Hawks
+            in receptions this season?",
+      <span class="k">"choices"</span>: ["#9 Pruitt", "#3 Harlow",
+                  "#1 Okafor", "#5 Vance"],
+      <span class="k">"correct"</span>: 0,
+      <span class="k">"focus"</span>: "personnel"
+    }
+  ]
+}</pre>
+      <p class="note">Always 4 choices, 1 correct. Exactly N questions, where N comes from the form.</p>
+    </div>
+    <div class="card">
+      <h3>Our code turns it into a quiz</h3>
+      <ul>
+        <li><b>IDs &amp; ownership:</b> <code>Random.id()</code>, teamId, createdBy.</li>
+        <li><b>Type assignment:</b> Classic by default; Recall only if media is attached; Free form keeps <code>choices[correct]</code> as the accepted answer; Stopwatch gets timer defaults.</li>
+        <li><b>Shuffle</b> choice order so the right answer isn't always first.</li>
+        <li><b>Media:</b> the selected diagram/photo is attached to every question.</li>
+        <li><b>Status:</b> saved as <b>Pending</b>; coach reviews, edits and sets Active.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Cost</span>
+  <h2>Cost per quiz</h2>
+  <p class="lede">List prices per million tokens, checked Oct 28, 2026. Token counts are planning estimates; real numbers come from logging the first test runs.</p>
+  <div class="calc">
+    <div class="ctrls">
+      <label for="model">Model
+        <select id="model"></select></label>
+      <label for="nq">Questions per quiz: <span id="nqv">10</span>
+        <input id="nq" type="range" min="1" max="50" value="10"></label>
+      <label for="src">Source data size
+        <select id="src"><option value="650">Small (~650 tok)</option><option value="1200" selected>Typical (~1,200 tok)</option><option value="2500">Large (~2,500 tok)</option></select></label>
+      <label for="vol">Generations per month
+        <input id="vol" type="number" min="1" step="100" value="1000"></label>
+      <label class="check" for="batch"><input id="batch" type="checkbox"> Batch API (−50%, up to 24 h)</label>
+    </div>
+    <div class="results">
+      <div class="big">
+        <div><b id="perQuiz">–</b><small>new approach, per quiz</small></div>
+        <div><b id="oldQuiz">–</b><small>hackathon approach, same model</small></div>
+        <div><b id="perMonth">–</b><small>per month (new)</small></div>
+      </div>
+      <div class="tw"><table aria-label="Model comparison"><thead><tr><th>Model</th><th>In / Out per 1M</th><th>Per quiz</th><th>Per month</th></tr></thead><tbody id="tbl"></tbody></table></div>
+      <p class="note">Hackathon approach assumed: ~2,700-token prompt sent uncached + minified raw data (~8,000 tok) + output that includes IDs and settings (~180 tok per question).</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Decisions for the team</span>
+  <h2>Open questions</h2>
+  <div class="grid2">
+    <div class="card"><h3>Model choice</h3><ul>
+      <li>Start on <b>Claude Sonnet 5.5</b> for question quality and sports terminology.</li>
+      <li>Run the same 20 reports through <b>Haiku 5.5</b>; if coaches can't tell the difference, switch (~20× cheaper).</li>
+      <li>A second "summarizer" model is only needed later for long free-text sources (PDFs, long notes).</li></ul></div>
+    <div class="card"><h3>Usage limits &amp; billing</h3><ul>
+      <li>Free generations per team per month, then paid or plan-based.</li>
+      <li>Log tokens and cost per generation, per team.</li>
+      <li>Hard cap per team per day to stop abuse.</li></ul></div>
+    <div class="card"><h3>Later scope</h3><ul>
+      <li>More sources: team stats, playbook, game film, notes.</li>
+      <li>Several items per quiz (e.g. two scout reports).</li>
+      <li>Video questions; mixed media per question; explanations.</li></ul></div>
+    <div class="card"><h3>Data &amp; privacy</h3><ul>
+      <li>No internal IDs, emails or contacts leave our server.</li>
+      <li>Opponent player names and numbers are sent (needed for questions).</li>
+      <li>Confirm the provider's no-training / retention terms.</li></ul></div>
+  </div>
+</section>
+</div>
+
+<script>
+const STEPS=[
+ {stage:"1 · Coach",n:"01",t:"Generate Quiz form",s:"Actions → Generate with AI",tag:"user",
+  body:`<div class="col"><h3>Form fields</h3><ul>
+   <li><b>Based on:</b> Scout Report · Presentation · Play (one item)</li>
+   <li><b>Item:</b> searchable list of that type</li>
+   <li><b>Number of questions:</b> 1–50, default 10</li>
+   <li><b>Difficulty:</b> Easy · Medium · Hard</li>
+   <li><b>Focus</b> (chips per source): Offense · Defense · Special teams · Personnel · Tendencies</li>
+   <li><b>Media</b> (optional): pick a diagram or photo from the team library; it goes on every question</li>
+   <li><b>Notes for the AI</b> (optional, ≤200 chars)</li></ul></div>
+   <div class="col"><h3>UX rules</h3><ul>
+   <li>One click, one quiz. No regenerate, no editing of the AI step.</li>
+   <li>Runs in the background; the coach gets a "Quiz ready" notice.</li>
+   <li>Result opens in Quiz Builder as a <b>Pending</b> quiz, fully editable.</li>
+   <li>On failure: one automatic retry, then "Quiz could not be generated, try again".</li></ul></div>`},
+ {stage:"",n:"02",t:"Collect source data",s:"Same queries as the print builder",tag:"code",
+  body:`<div class="col"><h3>Collector per source type</h3><ul>
+   <li><b>Scout Report:</b> report → sections, depth chart, linked team stats, players, diagrams, linked reports. Reuses the Scout Report Print Builder.</li>
+   <li><b>Presentation:</b> slides → plays, diagrams, notes.</li>
+   <li><b>Play:</b> name, formation, players/routes from diagram metadata, coach notes.</li></ul></div>
+   <div class="col"><h3>Built to grow</h3><p>Every collector returns the same shape, so adding Team Stats, Playbook or several items later means adding one collector, not changing the pipeline.</p>
+<pre>collect(sourceType, itemId) →
+  { sport, sourceType, sections[] }</pre></div>`},
+ {stage:"",n:"03",t:"Clean & compact",s:"Cut ~90%+ of tokens, free",tag:"code",
+  body:`<div class="col"><h3>Removed</h3><ul>
+   <li>Internal IDs, timestamps, authors, sharing lists</li>
+   <li>Image/logo URLs, print and theme settings</li>
+   <li>Empty sections, all-zero stat rows, duplicate diagrams, repeated notes</li>
+   <li>HTML tags, diagram coordinates and SVG</li></ul></div>
+   <div class="col"><h3>Kept, in short lines</h3><ul>
+   <li>Game info, coordinator notes, last 5 games</li>
+   <li>Depth chart and non-zero player stats as table rows</li>
+   <li>Team stats with national ranks</li>
+   <li>Diagrams as name + positions + routes + alerts</li></ul>
+   <p class="note">Done in code, not by a second AI. The data is already structured, so code is free, fast and gives the same result every time.</p></div>`},
+ {stage:"",n:"04",t:"Build the request",s:"Cached rules + small variable part",tag:"code",
+  body:`<div class="col"><h3>Prompt library</h3><ul>
+   <li>1 base prompt (question-writing rules, shared by all sports)</li>
+   <li>1 prompt per <b>sport × source</b> (Football × Scout Report, Basketball × Play …)</li>
+   <li>1 diagram legend per sport</li>
+   <li>1 JSON schema for the output</li></ul>
+   <p class="note">Stored as versioned files, so prompt changes can be tested and rolled back.</p></div>
+   <div class="col"><h3>Order matters</h3><p>Fixed parts go first so the provider can cache them. Variable parts go last: compact data, media metadata, options, coach note.</p></div>`},
+ {stage:"2 · AI",n:"05",t:"AI writes questions",s:"One call, structured output",tag:"ai",
+  body:`<div class="col"><h3>What we ask for</h3><ul>
+   <li>Exactly N multiple-choice questions</li>
+   <li>4 choices, 1 correct, plausible wrong answers taken from the same data</li>
+   <li>Respect difficulty, focus and the coach note</li>
+   <li>If media is attached: questions answerable from that diagram/photo</li></ul></div>
+   <div class="col"><h3>Why structured output</h3><p>The provider forces the reply to match our JSON schema. No format instructions in the prompt, no fragile text parsing, far fewer failed generations.</p></div>`},
+ {stage:"3 · Our server",n:"06",t:"Validate",s:"Schema, count, sanity checks",tag:"code",
+  body:`<div class="col"><h3>Checks</h3><ul>
+   <li>Valid against schema</li>
+   <li>Exactly N questions, 4 unique choices each, <code>correct</code> in 0–3</li>
+   <li>No empty or duplicate questions</li></ul></div>
+   <div class="col"><h3>On failure</h3><p>Retry once. If it fails again, mark the job failed and tell the coach. Log tokens, cost, latency and errors for every attempt.</p></div>`},
+ {stage:"",n:"07",t:"Map to quiz format",s:"IDs, types, media, defaults",tag:"code",
+  body:`<div class="col"><h3>Server adds</h3><ul>
+   <li>Question IDs, teamId, createdBy, quiz name</li>
+   <li>Attempts/ranking settings and timer defaults</li>
+   <li>Attached media on every question</li>
+   <li>Shuffled choice order</li></ul></div>
+   <div class="col"><h3>Question types</h3><ul>
+   <li><b>Classic</b> (default): 4 choices as returned</li>
+   <li><b>Recall:</b> only when media is attached</li>
+   <li><b>Free form:</b> drop wrong choices, keep the correct one as the accepted answer</li>
+   <li><b>Stopwatch:</b> Classic + timer</li></ul></div>`},
+ {stage:"",n:"08",t:"Save as Pending",s:"Coach reviews, then Active",tag:"user",
+  body:`<div class="col"><h3>Result</h3><p>A normal quiz in Quiz Builder with status <b>Pending</b>. The coach can edit any question, change types, then switch it to Active. This uses the existing Quiz Builder flow.</p></div>
+   <div class="col"><h3>Tracked per generation</h3><ul><li>Team, user, source type, model, prompt version</li><li>Input / cached / output tokens and cost</li><li>Status and duration</li></ul></div>`}
+];
+const pipe=document.getElementById('pipe'), drawer=document.getElementById('drawer');
+STEPS.forEach((st,i)=>{
+  if(st.stage){const l=document.createElement('div');l.className='stage-label';l.textContent=st.stage;pipe.appendChild(l);}
+  const b=document.createElement('button');b.className='step';b.id='step'+i;b.setAttribute('role','tab');
+  b.innerHTML=`<span class="n">${st.n}</span><span class="t">${st.t}</span><span class="s">${st.s}</span><span class="tag ${st.tag}">${st.tag==='user'?'COACH':st.tag.toUpperCase()}</span>`;
+  b.onclick=()=>select(i);pipe.appendChild(b);
+});
+function select(i){document.querySelectorAll('.step').forEach((b,j)=>b.setAttribute('aria-selected',i===j));drawer.innerHTML=STEPS[i].body;}
+select(0);
+
+const MODELS=[
+ {id:"sonnet",name:"Claude Sonnet 5.5",i:2,o:10,c:0.10},
+ {id:"haiku",name:"Claude Haiku 5.5",i:0.10,o:0.50,c:0.01},
+ {id:"opus",name:"Claude Opus 5.5",i:4,o:20,c:0.20},
+ {id:"sol",name:"OpenAI GPT-6.1 Sol",i:2,o:10,c:0.10},
+ {id:"luna",name:"OpenAI GPT-6 Luna",i:0.10,o:0.50,c:0.01}];
+const $=id=>document.getElementById(id);
+MODELS.forEach(m=>{const o=document.createElement('option');o.value=m.id;o.textContent=m.name;$('model').appendChild(o)});
+const CACHED=1500, OPTS=80;
+function cost(m,nq,src,batch){const k=batch?0.5:1;
+  return k*(CACHED*m.c+(src+OPTS)*m.i+(nq*90+30)*m.o)/1e6;}
+function oldCost(m,nq,batch){const k=batch?0.5:1;return k*((2700+8000+OPTS)*m.i+(nq*180+30)*m.o)/1e6;}
+const fmt=v=>v<0.01?'$'+v.toFixed(4):v<1?'$'+v.toFixed(3):'$'+v.toLocaleString('en-US',{maximumFractionDigits:2,minimumFractionDigits:2});
+function run(){
+  const nq=+$('nq').value, src=+$('src').value, vol=Math.max(1,+$('vol').value||1), b=$('batch').checked, sel=$('model').value;
+  $('nqv').textContent=nq;
+  const m=MODELS.find(x=>x.id===sel);
+  $('perQuiz').textContent=fmt(cost(m,nq,src,b));
+  $('oldQuiz').textContent=fmt(oldCost(m,nq,b));
+  $('perMonth').textContent=fmt(cost(m,nq,src,b)*vol);
+  $('tbl').innerHTML=MODELS.map(x=>`<tr class="${x.id===sel?'sel':''}"><td>${x.name}</td><td>$${x.i} / $${x.o}</td><td>${fmt(cost(x,nq,src,b))}</td><td>${fmt(cost(x,nq,src,b)*vol)}</td></tr>`).join('');
+}
+['model','nq','src','vol','batch'].forEach(id=>$(id).addEventListener('input',run));run();
+</script>
+</body>
+</html>
